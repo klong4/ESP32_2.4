@@ -16,7 +16,7 @@
 | Display Pin | Pin Name | Function | Teensy 4.0 Pin | Notes |
 |------------|----------|----------|----------------|-------|
 | 1 | GND | Ground | GND | Power ground |
-| 6 | SDO | MISO (optional) | 12 | Serial Data Out - optional for read operations |
+| **6** | **SDO** | **MISO** | **12** | **Serial Data Out - connected for read operations** |
 | 7 | VDD | Power (3.3V) | 3.3V | Display power supply |
 | 8 | VDDI | Logic (3.3V) | 3.3V | Logic level supply |
 | **9** | **SDA** | **MOSI** | **11** | **Serial Data In** |
@@ -32,7 +32,7 @@
 | 34-37 | LED-K1-4 | Backlight Cathode | GND | Connect all to ground |
 | **38** | **LED-A** | **Backlight Anode** | **6** | **PWM control via resistor** |
 | 39 | GND | Ground | GND | Ground |
-| 40 | TE | Tearing Effect | NC | Optional, not connected |
+| **40** | **TE** | **Tearing Effect** | **2** | **Optional vsync signal, connected to Pin 2** |
 
 ### Capacitive Touch Panel (FT5x26) - I2C
 
@@ -65,6 +65,7 @@
 | 3.3V | Power | VDD, VDDI, IM0, IM2, RDX |
 | GND | Ground | GND pins, LED-K1-4 |
 | **1** | **SD Card CS** | **SD CS** |
+| **2** | **Tearing Effect** | **TE (Pin 40)** |
 | 6 | Backlight PWM | LED-A via resistor |
 | 7 | Touch Interrupt | CTP /INT |
 | 8 | Reset | RESX & CTP /RESET |
@@ -85,7 +86,8 @@ In 3-wire SPI mode on the ST7789VI:
   - HIGH = Data mode
 - **SDA (Pin 9)** is the **MOSI** line for serial data
 - **CSX (Pin 10)** is the **Chip Select** (Active Low)
-- **SDO (Pin 6)** is optional MISO for read operations
+- **SDO (Pin 6)** is **MISO** for read operations (connected to Pin 12)
+- **TE (Pin 40)** provides **Tearing Effect** signal for vsync (connected to Pin 2)
 
 ## Important Notes
 
@@ -129,9 +131,10 @@ In 3-wire SPI mode on the ST7789VI:
 #define TFT_CS      10  // Chip Select
 #define TFT_MOSI    11  // SPI MOSI
 #define TFT_SCLK    13  // SPI Clock
-#define TFT_MISO    12  // SPI MISO (optional)
+#define TFT_MISO    12  // SPI MISO
 #define TFT_RST     8   // Reset
 #define TFT_BL      6   // Backlight PWM
+#define TFT_TE      2   // Tearing Effect (vsync)
 
 #define TOUCH_SDA   18  // I2C Data
 #define TOUCH_SCL   19  // I2C Clock
