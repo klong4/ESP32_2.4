@@ -45,6 +45,18 @@
 #define LV_INDEV_DEF_LONG_PRESS_TIME 200  /* Faster long press detection */
 #define LV_INDEV_DEF_LONG_PRESS_REPEAT_TIME 50  /* Faster repeat */
 
+/* Disable hardware accelerated draw engines */
+#define LV_USE_DRAW_VG_LITE 0
+#define LV_USE_DRAW_PXP 0
+#define LV_USE_DRAW_DMA2D 0
+#define LV_USE_DRAW_DAVE2D 0
+#define LV_USE_DRAW_NEMA_GFX 0
+#define LV_USE_DRAW_G2D 0
+#define LV_USE_DRAW_PPA 0
+#define LV_USE_DRAW_EVE 0
+#define LV_USE_DRAW_OPENGLES 0
+#define LV_USE_DRAW_SDL 0
+
 /*=======================
    OPERATING SYSTEM
  *=======================*/
