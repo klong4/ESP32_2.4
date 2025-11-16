@@ -109,8 +109,8 @@ bool ili9341_init(const ili9341_config_t *config) {
         .clock_speed_hz = config->spi_clock_mhz * 1000000,
         .mode = 0,
         .spics_io_num = config->pin_cs,
-        .queue_size = 7,
-        .flags = 0,
+        .queue_size = 16,  // Increased queue for better pipelining
+        .flags = SPI_DEVICE_NO_DUMMY,  // No dummy bits for faster transfers
         .pre_cb = NULL
     };
     
@@ -280,8 +280,8 @@ void ili9341_write_pixels(const uint16_t* pixels, uint32_t length) {
     
     gpio_set(display_config.pin_dc, 1); // Data mode
     
-    // Split into chunks if needed (max SPI transfer is typically 4092 bytes)
-    const uint32_t MAX_CHUNK = 2046; // 2046 pixels * 2 bytes = 4092 bytes
+    // Use larger chunks with DMA for better throughput
+    const uint32_t MAX_CHUNK = 16384; // 16384 pixels * 2 bytes = 32KB per transfer
     uint32_t remaining = length;
     const uint16_t* ptr = pixels;
     
@@ -295,7 +295,12 @@ void ili9341_write_pixels(const uint16_t* pixels, uint32_t length) {
             .rx_buffer = NULL
         };
         
-        spi_device_polling_transmit(spi_handle, &t);
+        // Use queued transmit for better pipelining
+        spi_device_queue_trans(spi_handle, &t, portMAX_DELAY);
+        
+        // Get result immediately (still allows DMA to work)
+        spi_transaction_t* rtrans;
+        spi_device_get_trans_result(spi_handle, &rtrans, portMAX_DELAY);
         
         ptr += chunk;
         remaining -= chunk;

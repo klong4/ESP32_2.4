@@ -6,7 +6,7 @@ import struct
 import os
 
 def rgb888_to_rgb565(r, g, b):
-    """Convert RGB888 to RGB565 format with Swap+Invert applied"""
+    """Convert RGB888 to RGB565 format with byte swap and invert"""
     # First convert to RGB565
     r5 = (r >> 3) & 0x1F
     g6 = (g >> 2) & 0x3F
@@ -17,7 +17,9 @@ def rgb888_to_rgb565(r, g, b):
     swapped = (rgb565 >> 8) | ((rgb565 & 0xFF) << 8)
     
     # Apply invert
-    return ~swapped & 0xFFFF
+    inverted = ~swapped & 0xFFFF
+    
+    return inverted
 
 def convert_logo(input_path, output_path, bg_color=(0, 0, 0)):
     """Convert PNG with transparency to RGB565 raw format with full screen splash"""

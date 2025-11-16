@@ -13,7 +13,7 @@ def rgb888_to_rgb565(r, g, b):
     return (r5 << 11) | (g6 << 5) | b5
 
 def convert_image(input_path, output_path):
-    """Convert PNG to RGB565 raw format"""
+    """Convert PNG to RGB565 raw format with Swap+Invert transformation pre-applied"""
     print(f"Converting {os.path.basename(input_path)}...")
     
     img = Image.open(input_path)
@@ -26,10 +26,15 @@ def convert_image(input_path, output_path):
             for x in range(width):
                 r, g, b = pixels[x, y]
                 rgb565 = rgb888_to_rgb565(r, g, b)
-                f.write(struct.pack('<H', rgb565))
+                
+                # Apply Swap+Invert transformation
+                swapped = (rgb565 >> 8) | ((rgb565 & 0xFF) << 8)  # Byte swap
+                inverted = ~swapped & 0xFFFF  # Invert
+                
+                f.write(struct.pack('<H', inverted))
     
     file_size = os.path.getsize(output_path)
-    print(f"  Created {os.path.basename(output_path)} ({file_size} bytes)")
+    print(f"  Created {os.path.basename(output_path)} ({file_size} bytes, pre-transformed)")
 
 # Convert all 12 frames
 input_dir = "src/ncat/full frame"

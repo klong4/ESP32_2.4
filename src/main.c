@@ -38,9 +38,9 @@ static const cable_config_t cable_configs[] = {
 static lv_obj_t *main_screen;
 static lv_obj_t *roller_cables;
 static lv_obj_t *label_detected;
-static lv_obj_t *label_status;
 static lv_obj_t *panel;
-static lv_obj_t *label_title;
+static lv_obj_t *top_bar;
+static lv_obj_t *label_selected;
 static lv_style_t style_sel;
 
 // Color profile cycling
@@ -59,8 +59,12 @@ static bool screensaver_active = false;
 #define NYAN_WIDTH 320
 #define NYAN_HEIGHT 240
 #define CHUNK_LINES 40  // Load 40 lines at a time (25,600 bytes per chunk)
+#define FRAME_DELAY_MS 0  // No delay - maximum speed
 static uint16_t* chunk_buffer = NULL;  // Small buffer for streaming
+static uint16_t* chunk_buffer2 = NULL;  // Secondary buffer for double buffering
 static int current_frame = 0;
+static int64_t last_frame_time = 0;
+static FILE* current_file = NULL;  // Keep file open for faster access
 
 // Update touch time (called from LVGL port layer)
 void update_touch_time(void) {
@@ -110,6 +114,7 @@ void update_touch_time(void) {
 
 static void draw_nyan_screensaver(void) {
     static bool bg_drawn = false;
+    static int last_loaded_frame = -1;
     
     // Draw dark background once
     if (!bg_drawn) {
@@ -117,46 +122,75 @@ static void draw_nyan_screensaver(void) {
         bg_drawn = true;
     }
     
-    // Allocate small chunk buffer once (40 lines = 25,600 bytes)
+    // Allocate double buffers once (40 lines each = 25,600 bytes)
     if (chunk_buffer == NULL) {
         chunk_buffer = (uint16_t*)malloc(NYAN_WIDTH * CHUNK_LINES * 2);
-        if (chunk_buffer == NULL) {
-            ESP_LOGE(TAG, "Failed to allocate chunk buffer (%d bytes)", NYAN_WIDTH * CHUNK_LINES * 2);
+        chunk_buffer2 = (uint16_t*)malloc(NYAN_WIDTH * CHUNK_LINES * 2);
+        if (chunk_buffer == NULL || chunk_buffer2 == NULL) {
+            ESP_LOGE(TAG, "Failed to allocate buffers (%d bytes each)", NYAN_WIDTH * CHUNK_LINES * 2);
             return;
         }
-        ESP_LOGI(TAG, "Allocated chunk buffer: %d bytes for %d lines", NYAN_WIDTH * CHUNK_LINES * 2, CHUNK_LINES);
+        ESP_LOGI(TAG, "Allocated double buffers: %d bytes each for %d lines", NYAN_WIDTH * CHUNK_LINES * 2, CHUNK_LINES);
     }
     
-    // Stream current frame from SD card in chunks
-    if (sd_mount()) {
-        char filename[32];
-        snprintf(filename, sizeof(filename), "nyan_%d.raw", current_frame);
+    // Open new file if frame changed
+    if (current_frame != last_loaded_frame) {
+        if (current_file != NULL) {
+            fclose(current_file);
+            current_file = NULL;
+        }
         
+        char filepath[64];
+        snprintf(filepath, sizeof(filepath), "/sdcard/nyan_%d.raw", current_frame);
+        current_file = fopen(filepath, "rb");
+        
+        if (current_file == NULL) {
+            ESP_LOGE(TAG, "Failed to open file: %s", filepath);
+            return;
+        }
+        last_loaded_frame = current_frame;
+    }
+    
+    // Stream current frame from SD card with double buffering
+    if (sd_mount() && current_file != NULL) {
         extern void ili9341_write_pixels(const uint16_t* pixels, uint32_t length);
         
-        // Stream image in 40-line chunks (6 chunks for 240 lines)
+        // Rewind file to start
+        fseek(current_file, 0, SEEK_SET);
+        
+        uint32_t chunk_size = NYAN_WIDTH * CHUNK_LINES * 2;
+        uint16_t* current_buffer = chunk_buffer;
+        uint16_t* next_buffer = chunk_buffer2;
+        
+        // Pre-read first chunk
+        size_t bytes_read = fread(current_buffer, 1, chunk_size, current_file);
+        
+        // Stream image in 40-line chunks (6 chunks for 240 lines) with double buffering
         for (int y = 0; y < NYAN_HEIGHT; y += CHUNK_LINES) {
-            uint32_t offset = y * NYAN_WIDTH * 2;  // Byte offset in file
-            uint32_t chunk_size = NYAN_WIDTH * CHUNK_LINES * 2;  // Bytes to read
-            
-            // Read chunk from SD card
-            if (sd_read_chunk(filename, offset, (uint8_t*)chunk_buffer, chunk_size)) {
-                // Apply Swap+Invert color transformation
-                for (int i = 0; i < NYAN_WIDTH * CHUNK_LINES; i++) {
-                    uint16_t pixel = chunk_buffer[i];
-                    pixel = (pixel >> 8) | (pixel << 8);  // Byte swap
-                    chunk_buffer[i] = ~pixel;              // Invert
-                }
-                
-                // Set window for this chunk
-                ili9341_set_addr_window(0, y, NYAN_WIDTH - 1, y + CHUNK_LINES - 1);
-                // Write chunk to display
-                ili9341_write_pixels(chunk_buffer, NYAN_WIDTH * CHUNK_LINES);
-            } else {
-                ESP_LOGE(TAG, "Failed to read chunk from %s at offset %d", filename, offset);
+            if (bytes_read != chunk_size) {
+                ESP_LOGE(TAG, "Failed to read chunk at line %d", y);
                 break;
             }
+            
+            // Start reading next chunk while writing current chunk
+            size_t next_bytes = 0;
+            if (y + CHUNK_LINES < NYAN_HEIGHT) {
+                next_bytes = fread(next_buffer, 1, chunk_size, current_file);
+            }
+            
+            // Write current chunk to display
+            ili9341_set_addr_window(0, y, NYAN_WIDTH - 1, y + CHUNK_LINES - 1);
+            ili9341_write_pixels(current_buffer, NYAN_WIDTH * CHUNK_LINES);
+            
+            // Swap buffers for next iteration
+            uint16_t* temp = current_buffer;
+            current_buffer = next_buffer;
+            next_buffer = temp;
+            bytes_read = next_bytes;
         }
+        
+        // Advance to next frame after successful draw
+        current_frame = (current_frame + 1) % 12;  // 12 frames total
     } else {
         ESP_LOGE(TAG, "SD card not mounted!");
     }
@@ -167,19 +201,27 @@ static void draw_nyan_screensaver(void) {
         ESP_LOGI(TAG, "Touch detected during screensaver, exiting");
         screensaver_active = false;
         bg_drawn = false;  // Reset for next time
+        last_loaded_frame = -1;
         
-        // Free buffer when exiting screensaver to save RAM
+        // Close file
+        if (current_file != NULL) {
+            fclose(current_file);
+            current_file = NULL;
+        }
+        
+        // Free buffers when exiting screensaver to save RAM
         if (chunk_buffer != NULL) {
             free(chunk_buffer);
             chunk_buffer = NULL;
+        }
+        if (chunk_buffer2 != NULL) {
+            free(chunk_buffer2);
+            chunk_buffer2 = NULL;
         }
         
         lv_obj_invalidate(main_screen);  // Redraw UI
         update_touch_time();  // Reset timer
     }
-    
-    // Advance to next frame every draw (maximum speed)
-    current_frame = (current_frame + 1) % 12;  // 12 frames total
 }
 
 // Read cable ID from IC (placeholder - implement based on your IC interface)
@@ -210,10 +252,8 @@ static void roller_event_handler(lv_event_t * e)
         uint32_t selected = lv_roller_get_selected(obj);
         ESP_LOGI(TAG, "Selected cable: %s", cable_configs[selected].name);
         
-        // Update status label
-        char status_text[64];
-        snprintf(status_text, sizeof(status_text), "Selected: %s", cable_configs[selected].name);
-        lv_label_set_text(label_status, status_text);
+        // Update top bar label with selected cable name
+        lv_label_set_text(label_selected, cable_configs[selected].name);
     }
 }
 
@@ -243,11 +283,9 @@ static void apply_color_profile(int profile) {
     lv_obj_set_style_bg_color(panel, lv_color_hex(profiles[profile].bg_color), 0);
     lv_obj_set_style_border_color(panel, lv_color_hex(profiles[profile].accent_color), 0);
     
-    // Update title color
-    lv_obj_set_style_text_color(label_title, lv_color_hex(profiles[profile].accent_color), 0);
-    
-    // Update status color
-    lv_obj_set_style_text_color(label_status, lv_color_hex(profiles[profile].accent_color), 0);
+    // Update top bar colors
+    lv_obj_set_style_bg_color(top_bar, lv_color_hex(profiles[profile].accent_color), 0);
+    lv_obj_set_style_text_color(label_selected, lv_color_hex(0xFFFFFF), 0);
     
     // Update roller colors
     lv_obj_set_style_bg_color(roller_cables, lv_color_hex(profiles[profile].bg_color), 0);
@@ -269,23 +307,33 @@ static void create_ui(void)
     lv_obj_set_style_bg_color(main_screen, lv_color_hex(0x0A1428), 0);
     lv_obj_set_style_bg_opa(main_screen, LV_OPA_COVER, 0);
     
-    // Create semi-transparent dark panel for UI
+    // Create solid top bar for selected cable
+    top_bar = lv_obj_create(main_screen);
+    lv_obj_set_size(top_bar, 320, 40);
+    lv_obj_align(top_bar, LV_ALIGN_TOP_MID, 0, 0);
+    lv_obj_set_style_bg_color(top_bar, lv_color_hex(0x00A8FF), 0);  // Vibrant blue
+    lv_obj_set_style_bg_opa(top_bar, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(top_bar, 0, 0);
+    lv_obj_set_style_radius(top_bar, 0, 0);
+    lv_obj_set_style_pad_all(top_bar, 0, 0);
+    
+    // Create selected cable label in top bar
+    label_selected = lv_label_create(top_bar);
+    lv_label_set_text(label_selected, cable_configs[0].name);
+    lv_obj_set_style_text_font(label_selected, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_color(label_selected, lv_color_hex(0xFFFFFF), 0);  // White text
+    lv_obj_set_style_bg_opa(label_selected, LV_OPA_TRANSP, 0);
+    lv_obj_center(label_selected);
+    
+    // Create semi-transparent dark panel for UI (below top bar)
     panel = lv_obj_create(main_screen);
-    lv_obj_set_size(panel, 300, 220);
-    lv_obj_center(panel);
+    lv_obj_set_size(panel, 300, 180);
+    lv_obj_align(panel, LV_ALIGN_CENTER, 0, 20);
     lv_obj_set_style_bg_color(panel, lv_color_hex(0x0A1428), 0);  // Dark blue
     lv_obj_set_style_bg_opa(panel, LV_OPA_80, 0);
     lv_obj_set_style_border_color(panel, lv_color_hex(0x00A8FF), 0);  // Vibrant blue
     lv_obj_set_style_border_width(panel, 2, 0);
     lv_obj_set_style_radius(panel, 10, 0);
-    
-    // Create title label
-    label_title = lv_label_create(panel);
-    lv_label_set_text(label_title, "Cable Configuration");
-    lv_obj_set_style_text_font(label_title, &lv_font_montserrat_20, 0);
-    lv_obj_set_style_text_color(label_title, lv_color_hex(0x00A8FF), 0);  // Vibrant blue
-    lv_obj_set_style_bg_opa(label_title, LV_OPA_TRANSP, 0);  // Transparent background
-    lv_obj_align(label_title, LV_ALIGN_TOP_MID, 0, 10);
     
     // Create detected cable status label
     label_detected = lv_label_create(panel);
@@ -293,7 +341,7 @@ static void create_ui(void)
     lv_obj_set_style_text_font(label_detected, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(label_detected, lv_color_hex(0xFF4444), 0);  // Red
     lv_obj_set_style_bg_opa(label_detected, LV_OPA_TRANSP, 0);  // Transparent background
-    lv_obj_align(label_detected, LV_ALIGN_TOP_LEFT, 10, 45);
+    lv_obj_align(label_detected, LV_ALIGN_TOP_LEFT, 10, 10);
     
     // Build options string for roller
     static char roller_opts[512];
@@ -308,7 +356,7 @@ static void create_ui(void)
     lv_roller_set_options(roller_cables, roller_opts, LV_ROLLER_MODE_INFINITE);
     lv_roller_set_visible_row_count(roller_cables, 4);
     lv_obj_set_width(roller_cables, 260);
-    lv_obj_align(roller_cables, LV_ALIGN_CENTER, 0, 20);
+    lv_obj_align(roller_cables, LV_ALIGN_CENTER, 0, 5);
     
     // Set roller to instant scrolling with no animations
     lv_obj_set_style_anim_duration(roller_cables, 0, 0);  // No animation delay
@@ -332,14 +380,6 @@ static void create_ui(void)
     // Add event handler
     lv_obj_add_event_cb(roller_cables, roller_event_handler, LV_EVENT_VALUE_CHANGED, NULL);
     
-    // Create status label at bottom
-    label_status = lv_label_create(panel);
-    lv_label_set_text(label_status, "Swipe to select cable type");
-    lv_obj_set_style_text_font(label_status, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(label_status, lv_color_hex(0x00A8FF), 0);  // Vibrant blue
-    lv_obj_set_style_bg_opa(label_status, LV_OPA_TRANSP, 0);  // Transparent background
-    lv_obj_align(label_status, LV_ALIGN_BOTTOM_MID, 0, -10);
-    
     ESP_LOGI(TAG, "LVGL UI created");
 }
 
@@ -357,6 +397,10 @@ static void update_detected_cable(uint8_t cable_id)
     }
 }
 
+// Embedded boot splash data (generated from boot_splash.raw)
+extern const uint8_t boot_splash_data[];
+extern const uint32_t boot_splash_data_size;
+
 // Display boot screen with HPTuners logo
 static void show_boot_screen(void) {
     ESP_LOGI(TAG, "=== BOOT SCREEN START ===");
@@ -365,51 +409,24 @@ static void show_boot_screen(void) {
     extern void ili9341_set_backlight(uint8_t brightness);
     ili9341_set_backlight(0);
     
-    // Load and display full boot splash screen using chunk streaming (like screensaver)
-    if (sd_mount()) {
-        #define SPLASH_WIDTH 320
-        #define SPLASH_HEIGHT 240
-        #define SPLASH_CHUNK_LINES 40  // Load 40 lines at a time (25,600 bytes)
+    // Display boot splash from embedded data (no SD card needed)
+    #define SPLASH_WIDTH 320
+    #define SPLASH_HEIGHT 240
+    #define SPLASH_CHUNK_LINES 40  // Display 40 lines at a time
+    
+    ESP_LOGI(TAG, "Displaying embedded boot splash (%d bytes)...", boot_splash_data_size);
+    
+    // Display in chunks for consistency with screensaver method
+    for (int y = 0; y < SPLASH_HEIGHT; y += SPLASH_CHUNK_LINES) {
+        uint32_t offset = y * SPLASH_WIDTH * 2;  // Byte offset
+        const uint16_t* chunk_ptr = (const uint16_t*)(boot_splash_data + offset);
         
-        uint16_t* splash_chunk = (uint16_t*)malloc(SPLASH_WIDTH * SPLASH_CHUNK_LINES * 2);
-        if (splash_chunk != NULL) {
-            ESP_LOGI(TAG, "Loading boot splash in %d-line chunks...", SPLASH_CHUNK_LINES);
-            
-            bool success = true;
-            
-            // Stream the image in chunks (same as screensaver)
-            for (int y = 0; y < SPLASH_HEIGHT; y += SPLASH_CHUNK_LINES) {
-                uint32_t offset = y * SPLASH_WIDTH * 2;  // Byte offset in file
-                uint32_t chunk_size = SPLASH_WIDTH * SPLASH_CHUNK_LINES * 2;  // Bytes to read
-                
-                if (!sd_read_chunk("hpt_logo.raw", offset, (uint8_t*)splash_chunk, chunk_size)) {
-                    ESP_LOGE(TAG, "Failed to read chunk at offset %d", offset);
-                    success = false;
-                    break;
-                }
-                
-                // Display this chunk (no color transform - already baked in)
-                ili9341_set_addr_window(0, y, SPLASH_WIDTH - 1, y + SPLASH_CHUNK_LINES - 1);
-                extern void ili9341_write_pixels(const uint16_t* pixels, uint32_t length);
-                ili9341_write_pixels(splash_chunk, SPLASH_WIDTH * SPLASH_CHUNK_LINES);
-            }
-            
-            if (success) {
-                ESP_LOGI(TAG, "Boot splash displayed successfully");
-            } else {
-                ESP_LOGE(TAG, "Boot splash incomplete - showing red screen");
-                ili9341_fill_screen(0xF800);
-            }
-            
-            free(splash_chunk);
-        } else {
-            ESP_LOGE(TAG, "Failed to allocate %d byte chunk buffer - showing blue screen", SPLASH_WIDTH * SPLASH_CHUNK_LINES * 2);
-            ili9341_fill_screen(0x001F);
-        }
-    } else {
-        ESP_LOGW(TAG, "SD card not mounted - showing green screen");
-        ili9341_fill_screen(0x07E0);
+        ili9341_set_addr_window(0, y, SPLASH_WIDTH - 1, y + SPLASH_CHUNK_LINES - 1);
+        extern void ili9341_write_pixels(const uint16_t* pixels, uint32_t length);
+        ili9341_write_pixels(chunk_ptr, SPLASH_WIDTH * SPLASH_CHUNK_LINES);
     }
+    
+    ESP_LOGI(TAG, "Boot splash displayed successfully");
     
     // Turn on backlight now that image is displayed
     ili9341_set_backlight(255);

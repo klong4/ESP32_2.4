@@ -33,7 +33,7 @@ bool sd_init(int cs_pin, int mosi_pin, int miso_pin, int clk_pin) {
         .sclk_io_num = clk_pin,
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
-        .max_transfer_sz = 4000,
+        .max_transfer_sz = 65536,  // Increase max transfer size for faster reads
         .flags = SPICOMMON_BUSFLAG_MASTER,
     };
     
