@@ -11,6 +11,7 @@ extern "C" {
 #endif
 
 #include <stdbool.h>
+#include <stdint.h>
 
 /**
  * Initialize LVGL with display and touch drivers

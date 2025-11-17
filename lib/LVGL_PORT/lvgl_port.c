@@ -77,7 +77,7 @@ static void disp_flush(lv_display_t *disp_drv, const lv_area_t *area, uint8_t *p
     /* Set the drawing region */
     display_set_addr_window(area->x1, area->y1, area->x2, area->y2);
     
-    /* Write pixels directly - parallel interface handles data transmission */
+    /* LVGL already handles byte swap via LV_COLOR_16_SWAP, write pixels directly */
     uint32_t size = (area->x2 - area->x1 + 1) * (area->y2 - area->y1 + 1);
     display_write_pixels(color_p, size);
     

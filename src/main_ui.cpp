@@ -82,7 +82,7 @@ static uint16_t* frame_buffer = NULL;
 static int current_frame = 0;
 static uint32_t last_frame_time = 0;
 
-// SD Card (Software SPI)
+// SD Card (Software SPI on safe pins - avoid display/touch conflicts)
 #define SD_CS   0
 #define SD_MOSI 1
 #define SD_MISO 2
@@ -199,6 +199,99 @@ static uint8_t soft_i2c_read_byte(bool ack) {
 static uint8_t read_cable_id(void) {
     // TODO: Implement actual cable ID detection
     return 0x00;
+}
+
+// Scan I2C bus and report devices
+static void scan_i2c_bus(void) {
+    Serial.println("\n[I2C SCAN] Scanning I2C bus...");
+    int devices_found = 0;
+    
+    for (uint8_t addr = 1; addr < 127; addr++) {
+        Wire.beginTransmission(addr);
+        uint8_t error = Wire.endTransmission();
+        
+        if (error == 0) {
+            Serial.print("[I2C SCAN] Device found at 0x");
+            if (addr < 16) Serial.print("0");
+            Serial.print(addr, HEX);
+            Serial.print(" (");
+            
+            // Identify common devices
+            if (addr == 0x38) Serial.print("FT6236/FT5x26 Touch Controller");
+            else if (addr == 0x48) Serial.print("ADS1115 ADC");
+            else if (addr == 0x68) Serial.print("MPU6050/DS1307 RTC");
+            else if (addr == 0x76 || addr == 0x77) Serial.print("BMP280/BME280");
+            else Serial.print("Unknown");
+            
+            Serial.println(")");
+            devices_found++;
+        }
+    }
+    
+    if (devices_found == 0) {
+        Serial.println("[I2C SCAN] No I2C devices found");
+    } else {
+        Serial.print("[I2C SCAN] Found ");
+        Serial.print(devices_found);
+        Serial.println(" device(s)");
+    }
+    Serial.println();
+}
+
+// Test SPI communication
+static void test_spi_bus(void) {
+    Serial.println("\n[SPI TEST] Testing SPI bus...");
+    Serial.print("[SPI TEST] MOSI=");
+    Serial.print(SD_MOSI);
+    Serial.print(", MISO=");
+    Serial.print(SD_MISO);
+    Serial.print(", SCK=");
+    Serial.println(SD_SCK);
+    
+    // Note: Display uses parallel interface (DB0-DB15), not SPI
+    // SPI is only for SD card and won't interfere with display
+    
+    // Configure SPI pins
+    pinMode(SD_MOSI, OUTPUT);
+    pinMode(SD_MISO, INPUT);
+    pinMode(SD_SCK, OUTPUT);
+    pinMode(SD_CS, OUTPUT);
+    digitalWrite(SD_CS, HIGH);
+    
+    Serial.println("[SPI TEST] SPI pins configured");
+    Serial.println();
+}
+
+// Boot splash data
+extern const uint8_t boot_splash_data[];
+extern const uint32_t boot_splash_data_size;
+
+// Display boot splash and wait for touch
+static void show_boot_splash(void) {
+    Serial.println("[MAIN] Displaying boot splash...");
+    
+    // Display is 240x320 but we're in landscape (320x240)
+    // Boot splash is 320x240 RGB565 format
+    const uint16_t *splash_pixels = (const uint16_t *)boot_splash_data;
+    
+    display_set_addr_window(0, 0, 239, 319);
+    display_write_pixels(splash_pixels, 240 * 320);
+    
+    Serial.println("[MAIN] Boot splash displayed, waiting for touch...");
+    
+    // Wait for touch before continuing
+    delay(100);  // Debounce
+    while (true) {
+        ft5x26_touch_t touch_data;
+        if (ft5x26_read_touch(&touch_data) && touch_data.touch_count > 0) {
+            Serial.println("[MAIN] Touch detected, starting application");
+            delay(200);  // Debounce
+            break;
+        }
+        delay(50);
+    }
+    
+    display_fill_screen(DISPLAY_BLACK);
 }
 
 // LVGL roller event handler
@@ -367,53 +460,83 @@ void setup() {
     
     Serial.println("\n========================================");
     Serial.println("Teensy 4.0 Cable Tester with LVGL UI");
+    Serial.println("Hardware Diagnostic Mode");
     Serial.println("========================================\n");
-
-    // Initialize display (16-bit parallel mode - same config that worked in test)
-    display_config_t display_config = {
-        .pin_data = {19, 18, 14, 15, 28, 29, 30, 31, 22, 23, 20, 21, 24, 25, 26, 27},  // DB0-DB15 for 16-bit mode
-        .pin_dc = DISP_DC,
-        .pin_cs = DISP_CS,
-        .pin_wr = DISP_WR,
-        .pin_rd = DISP_RD,
-        .pin_rst = DISP_RST,
-        .pin_bl = DISP_BL,
-        .pin_im0 = DISP_IM0,
-        .pin_im2 = DISP_IM2,
-        .use_16bit = true
-    };
     
-    if (!display_init(&display_config)) {
-        Serial.println("[MAIN] ERROR: Display initialization failed!");
+    Serial.println("[STARTUP] Phase 1: SD Card Initialization (10s)");
+    Serial.println("--------------------------------------------");
+
+    // Initialize SD card FIRST (uses separate SPI bus from display parallel interface)
+    Serial.println("[MAIN] Initializing SD card...");
+    Serial.print("[MAIN] SD pins: CS=");
+    Serial.print(SD_CS);
+    Serial.print(", MOSI=");
+    Serial.print(SD_MOSI);
+    Serial.print(", MISO=");
+    Serial.print(SD_MISO);
+    Serial.print(", SCK=");
+    Serial.println(SD_SCK);
+    
+    // Test SPI bus first
+    test_spi_bus();
+    
+    // Initialize SPI for SD card
+    SPI.setMOSI(SD_MOSI);
+    SPI.setMISO(SD_MISO);
+    SPI.setSCK(SD_SCK);
+    SPI.begin();
+    
+    bool sd_initialized = false;
+    if (!SD.begin(SD_CS, SD_SCK_MHZ(4))) {
+        Serial.println("[MAIN] WARNING: SD card initialization failed at 4 MHz");
+        Serial.println("[MAIN] Trying slower speed (1 MHz)...");
+        if (!SD.begin(SD_CS, SD_SCK_MHZ(1))) {
+            Serial.println("[MAIN] ERROR: SD card initialization failed at 1 MHz");
+        } else {
+            Serial.println("[MAIN] SD card initialized at 1 MHz");
+            sd_initialized = true;
+        }
+    } else {
+        Serial.println("[MAIN] SD card initialized successfully at 4 MHz");
+        sd_initialized = true;
+    }
+    
+    if (!sd_initialized) {
+        Serial.println("\n*** CRITICAL ERROR: SD CARD NOT FOUND ***");
+        Serial.println("System cannot start without SD card.");
+        Serial.println("Please:");
+        Serial.println("  1. Insert SD card");
+        Serial.println("  2. Ensure it's formatted as FAT32");
+        Serial.println("  3. Check wiring: CS=0, MOSI=1, MISO=2, SCK=7");
+        Serial.println("  4. Press reset button to retry");
+        Serial.println("******************************************\n");
+        while(1) {
+            delay(1000);
+            digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
+        }
+    }
+    
+    // Verify required files exist
+    if (SD.exists("boot_splash.raw")) {
+        Serial.println("[MAIN] ✓ Found boot_splash.raw");
+    } else {
+        Serial.println("[MAIN] ERROR: boot_splash.raw not found on SD card");
+        Serial.println("[MAIN] System cannot start without boot splash");
         while(1) delay(1000);
     }
     
-    display_fill_screen(DISPLAY_BLACK);
-    display_on();
-    Serial.println("[MAIN] Display initialized");
-    
-    // Test color bars before starting UI
-    Serial.println("[MAIN] Drawing color bar test...");
-    const uint16_t colors[] = {
-        DISPLAY_RED,     // 0xF800
-        DISPLAY_GREEN,   // 0x07E0
-        DISPLAY_BLUE,    // 0x001F
-        DISPLAY_YELLOW,  // 0xFFE0
-        DISPLAY_CYAN,    // 0x07FF
-        DISPLAY_MAGENTA, // 0xF81F
-        DISPLAY_WHITE,   // 0xFFFF
-        DISPLAY_BLACK    // 0x0000
-    };
-    for (int i = 0; i < 8; i++) {
-        display_fill_rect(0, i * 40, 240, 40, colors[i]);
-        Serial.print("[MAIN] Bar ");
-        Serial.print(i);
-        Serial.print(" color: 0x");
-        Serial.println(colors[i], HEX);
+    if (SD.exists("nyan_0.raw")) {
+        Serial.println("[MAIN] ✓ Found screensaver frames (nyan_0.raw)");
+    } else {
+        Serial.println("[MAIN] WARNING: Screensaver frames not found");
     }
-    delay(3000);  // Show color bars for 3 seconds
-    display_fill_screen(DISPLAY_BLACK);
-    Serial.println("[MAIN] Color bar test complete");
+    
+    Serial.println("[MAIN] Waiting 10 seconds for SD card stabilization...");
+    delay(10000);
+    Serial.println();
+    
+    Serial.println("[STARTUP] Phase 2: Touch Controller Initialization (10s)");
+    Serial.println("--------------------------------------------");
 
     // Initialize touch
     soft_i2c_init();
@@ -435,17 +558,46 @@ void setup() {
     } else {
         Serial.println("[MAIN] Touch controller initialized");
     }
-
-    // Initialize SD card
-    SPI.setMOSI(SD_MOSI);
-    SPI.setMISO(SD_MISO);
-    SPI.setSCK(SD_SCK);
     
-    if (!SD.begin(SD_CS, SD_SCK_MHZ(4))) {
-        Serial.println("[MAIN] WARNING: SD card initialization failed");
-    } else {
-        Serial.println("[MAIN] SD card initialized");
+    // Scan I2C bus for devices
+    Wire.begin();
+    scan_i2c_bus();
+    
+    Serial.println("[MAIN] Waiting 10 seconds for touch controller stabilization...");
+    delay(10000);
+    Serial.println();
+    
+    Serial.println("[STARTUP] Phase 3: Display Initialization (10s)");
+    Serial.println("--------------------------------------------");
+
+    // Initialize display LAST (16-bit parallel mode)
+    display_config_t display_config = {
+        .pin_data = {19, 18, 14, 15, 28, 29, 30, 31, 22, 23, 20, 21, 24, 25, 26, 27},  // DB0-DB15 for 16-bit mode
+        .pin_dc = DISP_DC,
+        .pin_cs = DISP_CS,
+        .pin_wr = DISP_WR,
+        .pin_rd = DISP_RD,
+        .pin_rst = DISP_RST,
+        .pin_bl = DISP_BL,
+        .pin_im0 = DISP_IM0,
+        .pin_im2 = DISP_IM2,
+        .use_16bit = true
+    };
+    
+    if (!display_init(&display_config)) {
+        Serial.println("[MAIN] ERROR: Display initialization failed!");
+        while(1) delay(1000);
     }
+    
+    display_fill_screen(DISPLAY_BLACK);
+    display_on();
+    Serial.println("[MAIN] Display initialized");
+    Serial.println("[MAIN] Waiting 10 seconds for display stabilization...");
+    delay(10000);
+    Serial.println();
+    
+    Serial.println("[STARTUP] Phase 4: LVGL UI Initialization");
+    Serial.println("--------------------------------------------");
 
     // Initialize LVGL
     Serial.println("[MAIN] Initializing LVGL...");
@@ -461,23 +613,15 @@ void setup() {
     last_profile_change = last_touch_time;
     create_ui();
     Serial.println("[MAIN] UI created");
-    
-    // Force LVGL to render immediately
-    Serial.println("[MAIN] Forcing initial LVGL render...");
-    for (int i = 0; i < 10; i++) {
-        lv_tick_inc(5);
-        lv_timer_handler();
-        delay(5);
-    }
-    Serial.println("[MAIN] Initial render complete");
 
     detected_cable_id = read_cable_id();
     update_detected_cable(detected_cable_id);
 
     Serial.println("[MAIN] System ready!");
+    Serial.println("[MAIN] Theme cycling every 5 seconds");
     Serial.print("[MAIN] Screensaver activates after ");
-    Serial.print(SCREENSAVER_TIMEOUT_MS);
-    Serial.println(" ms of inactivity");
+    Serial.print(SCREENSAVER_TIMEOUT_MS / 1000);
+    Serial.println(" seconds of inactivity");
 }
 
 void loop() {
@@ -485,13 +629,13 @@ void loop() {
     static uint32_t last_debug_time = 0;
     uint32_t now = millis();
 
-    // Color profile cycling disabled - keeping static color scheme
-    // if (!screensaver_active) {
-    //     if (now - last_profile_change > 5000) {
-    //         update_color_profile();
-    //         last_profile_change = now;
-    //     }
-    // }
+    // Color profile cycling every 5 seconds (when not in screensaver)
+    if (!screensaver_active) {
+        if (now - last_profile_change > 5000) {
+            update_color_profile();
+            last_profile_change = now;
+        }
+    }
 
     // Check for cable ID changes
     if (now - last_id_check > 1000) {
