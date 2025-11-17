@@ -2,11 +2,23 @@
 #include <SdFat.h>
 #include <SPI.h>
 #include <Wire.h>
-#include "st7789.h"
+#include "display.h"
 #include "ft6236.h"
+
+// Display selection info
+#ifdef DISPLAY_ST7789
+    #define DISPLAY_NAME "ST7789VI 240x320 (SPI)"
+#elif defined(DISPLAY_ST7789_PARALLEL)
+    #define DISPLAY_NAME "ST7789VI 240x320 (8/16-bit Parallel)"
+#elif defined(DISPLAY_ST7262)
+    #define DISPLAY_NAME "ST7262 800x480 (24-bit Parallel RGB)"
+#endif
 
 // Pin configuration - ER-TFTM024-3 to Teensy 4.0 (3-wire SPI + I2C Touch)
 // 3-Wire SPI Mode: IM0=1, IM2=1
+// 
+// NOTE: Teensy 4.0 has pins 0-23 on top (easy access) and pins 24-33 as bottom solder pads
+// This configuration minimizes bottom pad usage for breadboard-friendly prototyping
 
 // TFT LCD (ST7789VI) - 3-Wire SPI
 #define TFT_DC      9   // Pin 9  → Pin 11 DCX (Data/Command Select)
@@ -17,17 +29,44 @@
 #define TFT_RST     8   // Pin 8  → Pin 30 RESX (Reset, optional)
 #define TFT_BL      6   // Pin 6  → Pin 38 LED-A (Backlight PWM)
 #define TFT_TE      2   // Pin 2  → Pin 40 TE (Tearing Effect vsync)
+#define TFT_IM0     4   // Pin 4  → Pin 31 IM0 (Interface Mode 0)
+#define TFT_IM2     3   // Pin 3  → Pin 32 IM2 (Interface Mode 2)
 
-// CTP Touch (FT5x26) - I2C
+// CTP Touch (FT5x26)
+#ifdef DISPLAY_ST7789
+// I2C0 (Hardware I2C) for ST7789 SPI mode
 #define TOUCH_SDA   18  // Pin 18 (SDA0) → CTP Pin 4 SDA (I2C Data)
 #define TOUCH_SCL   19  // Pin 19 (SCL0) → CTP Pin 3 SCL (I2C Clock)
-#define TOUCH_INT   7   // Pin 7  → CTP Pin 5 /INT (Touch Interrupt, optional)
+#define TOUCH_INT   17  // Pin 17  → CTP Pin 5 /INT (Touch Interrupt, optional)
+#define TOUCH_RST   8   // Pin 8 → CTP Pin 6 /RST (Touch Reset, shared with display)
+#else
+// Software I2C for ST7789 Parallel and ST7262 (to avoid pin conflicts)
+#define TOUCH_SDA   17  // Pin 17 → CTP Pin 4 SDA (Software I2C Data)
+#define TOUCH_SCL   16  // Pin 16 → CTP Pin 3 SCL (Software I2C Clock)
+#define TOUCH_INT   32  // Pin 32 → CTP Pin 5 /INT (Touch Interrupt, bottom pad)
+#define TOUCH_RST   8   // Pin 8 → CTP Pin 6 /RST (Touch Reset)
+#endif
 
-// SD Card - Dedicated SPI1 bus (not shared with display)
+// SD Card - Software SPI
+#ifdef DISPLAY_ST7789
+// For ST7789 SPI mode - Hardware SPI1
 #define SD_CS       0   // Pin 0 → SD Card Chip Select
-#define SD_MOSI     26  // Pin 26 → SD MOSI (SPI1)
-#define SD_MISO     1   // Pin 1 → SD MISO (SPI1)
-#define SD_SCK      27  // Pin 27 → SD SCK (SPI1)
+#define SD_MOSI     26  // Pin 26 → SD MOSI (Hardware SPI1)
+#define SD_MISO     1   // Pin 1 → SD MISO (Hardware SPI1)
+#define SD_SCK      27  // Pin 27 → SD SCK (Hardware SPI1)
+#elif defined(DISPLAY_ST7789_PARALLEL)
+// For ST7789 Parallel mode - Software SPI (to avoid conflicts with DB14/DB15)
+#define SD_CS       0   // Pin 0 → SD Card Chip Select
+#define SD_MOSI     1   // Pin 1 → SD MOSI (Software SPI)
+#define SD_MISO     2   // Pin 2 → SD MISO (Software SPI)
+#define SD_SCK      7   // Pin 7 → SD SCK (Software SPI)
+#else
+// For ST7262 mode - Software SPI
+#define SD_CS       7   // Pin 7 → SD Card Chip Select
+#define SD_MOSI     1   // Pin 1 → SD MOSI (Software SPI)
+#define SD_MISO     2   // Pin 2 → SD MISO (Software SPI)
+#define SD_SCK      0   // Pin 0 → SD SCK (Software SPI)
+#endif
 
 // NOTE: Interface Mode Selection for 4-Wire SPI
 // IM0 (Pin 31) = 3.3V (HIGH)
@@ -50,7 +89,8 @@ void setup() {
     
     Serial.println("");
     Serial.println("========================================");
-    Serial.println("Teensy 4.0 ST7789VI + FT5x26 Touch Demo");
+    Serial.print("Teensy 4.0 Display Test - ");
+    Serial.println(DISPLAY_NAME);
     Serial.println("========================================");
     Serial.println("");
     
@@ -84,20 +124,52 @@ void setup() {
     Serial.println("Manual SPI test complete - check MOSI/SCK with scope");
     delay(2000);
     
-    // Initialize display FIRST (3-wire SPI mode)
+    // Initialize display FIRST
+    #ifdef DISPLAY_ST7789
     st7789_config_t display_config = {
-        .pin_mosi = TFT_MOSI,      // Pin 11 â†’ SDA (Pin 9)
-        .pin_miso = TFT_MISO,      // Pin 12 â†’ SDO (Pin 6, optional)
-        .pin_sclk = TFT_SCLK,      // Pin 13 â†’ WRX/SCK (Pin 12)
-        .pin_cs = TFT_CS,          // Pin 10 â†’ CSX (Pin 10)
-        .pin_dc = TFT_DC,          // Pin 9 â†’ DCX (Pin 11)
-        .pin_rst = TFT_RST,        // Pin 8 â†’ RESX (Pin 30)
-        .pin_bl = TFT_BL,          // Pin 6 â†’ LED-A (Pin 38)
+        .pin_mosi = TFT_MOSI,      // Pin 11 → SDA (Pin 9)
+        .pin_miso = TFT_MISO,      // Pin 12 → SDO (Pin 6, optional)
+        .pin_sclk = TFT_SCLK,      // Pin 13 → WRX/SCK (Pin 12)
+        .pin_cs = TFT_CS,          // Pin 10 → CSX (Pin 10)
+        .pin_dc = TFT_DC,          // Pin 9 → DCX (Pin 11)
+        .pin_rst = TFT_RST,        // Pin 8 → RESX (Pin 30)
+        .pin_bl = TFT_BL,          // Pin 6 → LED-A (Pin 38)
+        .pin_im0 = TFT_IM0,        // Pin 4 → IM0 (Pin 31)
+        .pin_im2 = TFT_IM2,        // Pin 3 → IM2 (Pin 32)
         .spi_clock_mhz = 30        // 30MHz SPI clock for Teensy 4.0
     };
+    #elif defined(DISPLAY_ST7789_PARALLEL)
+    // ST7789VI 8-bit parallel configuration
+    st7789_parallel_config_t display_config = {
+        .pin_data = {19, 18, 14, 15, 28, 29, 30, 31, 0, 0, 0, 0, 0, 0, 0, 0}, // DB0-DB7 (8-bit mode, DB4-7 on bottom)
+        .pin_dc = 9,       // Data/Command
+        .pin_cs = 10,      // Chip Select
+        .pin_wr = 13,      // Write strobe (WRX)
+        .pin_rd = 5,       // Read strobe (RDX)
+        .pin_rst = 8,      // Reset
+        .pin_bl = 6,       // Backlight
+        .pin_im0 = 4,      // IM0 - Interface mode bit 0
+        .pin_im2 = 3,      // IM2 - Interface mode bit 2
+        .use_16bit = false // 8-bit mode (set true for 16-bit)
+    };
+    #elif defined(DISPLAY_ST7262)
+    // ST7262 24-bit parallel RGB configuration
+    st7262_config_t display_config = {
+        .pin_r = {19, 18, 14, 15, 28, 29, 30, 31}, // R0-R7 (R4-7 on bottom)
+        .pin_g = {22, 23, 20, 21, 24, 25, 26, 27}, // G0-G7 (G4-7 on bottom)
+        .pin_b = {10, 12, 11, 13, 16, 17, 32, 33}, // B0-B7 (B6-7 on bottom, note: 32/33 shared with PCLK/STBY!)
+        .pin_de = 6,       // Data Enable
+        .pin_vsync = 5,    // Vertical Sync
+        .pin_hsync = 4,    // Horizontal Sync
+        .pin_pclk = 32,    // Pixel Clock (bottom, conflicts with B6!)
+        .pin_rst = 33,     // Standby (bottom, conflicts with B7!)
+        .pin_bl = 23,      // Backlight control (PWM)
+        .pixel_clock_hz = 30000000  // 30MHz pixel clock
+    };
+    #endif
     
     Serial.println("Initializing display...");
-    if (!st7789_init(&display_config)) {
+    if (!display_init(&display_config)) {
         Serial.println("Display initialization failed!");
         return;
     }
@@ -113,46 +185,103 @@ void setup() {
     // Test display with full screen colors
     Serial.println("Filling screen with WHITE...");
     Serial.println("  (Screen should be completely white now)");
-    st7789_fill_screen(ST7789_WHITE);
+    display_fill_screen(DISPLAY_WHITE);
     
     // Turn on display AFTER first pixel write (like Newhaven sample)
     Serial.println("Turning on display (sending command 0x29)...");
-    st7789_display_on();
+    display_on();
     delay(2000);
     
-    Serial.println("\nFilling screen with RED...");
-    Serial.println("  (Screen should be completely red now)");
-    st7789_fill_screen(ST7789_RED);
-    delay(2000);
+    #ifdef DISPLAY_ST7789
+    // Test different SPI speeds, modes, and communication types (ST7789 only)
+    Serial.println("\n======================================");
+    Serial.println("SPI Speed, Mode, and Type Testing");
+    Serial.println("======================================\n");
     
-    Serial.println("Filling screen with GREEN...");
-    Serial.println("  (Screen should be completely green now)");
-    st7789_fill_screen(ST7789_GREEN);  
-    delay(2000);
+    uint32_t speeds[] = {100000, 250000, 500000, 750000, 1000000, 1500000, 2000000, 3000000, 4000000, 
+                         6000000, 8000000, 10000000, 12000000, 16000000, 20000000, 24000000, 30000000, 
+                         36000000, 40000000, 48000000, 54000000, 60000000};
+    const char* speed_names[] = {"100kHz", "250kHz", "500kHz", "750kHz", "1MHz", "1.5MHz", "2MHz", "3MHz", "4MHz",
+                                 "6MHz", "8MHz", "10MHz", "12MHz", "16MHz", "20MHz", "24MHz", "30MHz",
+                                 "36MHz", "40MHz", "48MHz", "54MHz", "60MHz"};
+    uint8_t modes[] = {SPI_MODE0, SPI_MODE1, SPI_MODE2, SPI_MODE3};
+    const char* mode_names[] = {"MODE0", "MODE1", "MODE2", "MODE3"};
+    uint8_t spi_types[] = {ST7789_SPI_MODE_HW_4WIRE, ST7789_SPI_MODE_HW_3WIRE, ST7789_SPI_MODE_BITBANG};
+    const char* spi_type_names[] = {"4-Wire HW", "3-Wire HW", "Bit-Bang"};
     
-    Serial.println("Filling screen with BLUE...");
-    Serial.println("  (Screen should be completely blue now)");
-    st7789_fill_screen(ST7789_BLUE);
-    delay(2000);
-    
-    Serial.println("Filling screen with BLACK...");
-    Serial.println("  (Screen should be completely black now)");
-    st7789_fill_screen(ST7789_BLACK);
-    delay(1000);
-    
-    // Draw test pattern
-    Serial.println("Drawing checkerboard pattern...");
-    Serial.println("  (Screen should show black and white squares)");
-    for(int y = 0; y < ST7789_HEIGHT; y += 40) {
-        for(int x = 0; x < ST7789_WIDTH; x += 40) {
-            uint16_t color = ((x/40) + (y/40)) % 2 ? ST7789_WHITE : ST7789_BLACK;
-            st7789_fill_rect(x, y, 40, 40, color);
+    for (int t = 0; t < 3; t++) {
+        Serial.print("\n========== Testing ");
+        Serial.print(spi_type_names[t]);
+        Serial.println(" SPI ==========");
+        
+        for (int m = 0; m < 4; m++) {
+            Serial.print("\n*** ");
+            Serial.print(spi_type_names[t]);
+            Serial.print(" - ");
+            Serial.print(mode_names[m]);
+            Serial.println(" ***\n");
+            
+            for (int s = 0; s < 22; s++) {
+                Serial.print("Testing ");
+                Serial.print(speed_names[s]);
+                Serial.print(" @ ");
+                Serial.print(spi_type_names[t]);
+                Serial.print(" ");
+                Serial.print(mode_names[m]);
+                Serial.print("... ");
+                
+                // Set SPI mode and speed
+                st7789_set_spi_mode(spi_types[t]);
+                st7789_set_spi_settings(speeds[s], modes[m]);
+                
+                // Full re-initialization for each test
+                if (!display_init(&display_config)) {
+                    Serial.println("Init failed!");
+                    continue;
+                }
+                display_on();
+                
+                // Draw test pattern: RED top half, BLUE bottom half
+                display_fill_rect(0, 0, 240, 160, DISPLAY_RED);
+                display_fill_rect(0, 160, 240, 160, DISPLAY_BLUE);
+                
+                Serial.println("Done.");
+                delay(800); // Give time to observe
+            }
         }
     }
     
+    Serial.println("\n======================================");
+    Serial.println("Speed/Mode testing complete!");
+    Serial.println("======================================\n");
+    
+    // Final test with checkerboard at best guess settings
+    Serial.println("Final test: Checkerboard at 4MHz MODE0...");
+    display_set_spi_settings(4000000, SPI_MODE0);
+    for (int y = 0; y < 320; y += 20) {
+        for (int x = 0; x < 240; x += 20) {
+            display_color_t color = ((x / 20 + y / 20) % 2) ? DISPLAY_WHITE : DISPLAY_BLACK;
+            display_fill_rect(x, y, 20, 20, color);
+        }
+    }
+    Serial.println("Display test complete!");
+    #else
+    // Simple color test for parallel displays
+    Serial.println("\nTesting parallel RGB display...");
+    Serial.println("RED screen...");
+    display_fill_screen(DISPLAY_RED);
+    delay(2000);
+    Serial.println("GREEN screen...");
+    display_fill_screen(DISPLAY_GREEN);
+    delay(2000);
+    Serial.println("BLUE screen...");
+    display_fill_screen(DISPLAY_BLUE);
+    delay(2000);
+    Serial.println("Display test complete!");
+    #endif
+    
     Serial.println("\n*** DISPLAY TEST COMPLETE ***");
-    Serial.println("If you saw the screen change colors, display is WORKING");
-    Serial.println("If screen stayed blank/white, display needs troubleshooting");
+    Serial.println("Check serial output to see which speed/mode worked");
     Serial.println("");
     
     // Test touch controller
@@ -272,11 +401,18 @@ void test_touch() {
 }
 
 void test_sd_card() {
-    Serial.println("Initializing SD card on dedicated SPI1 bus...");
+    Serial.println("Initializing SD card...");
     Serial.printf("SD CS Pin: %d\n", SD_CS);
-    Serial.printf("SPI1: MOSI=%d, MISO=%d, SCK=%d\n", SD_MOSI, SD_MISO, SD_SCK);
+    Serial.printf("SPI: MOSI=%d, MISO=%d, SCK=%d\n", SD_MOSI, SD_MISO, SD_SCK);
     
+    #ifdef DISPLAY_ST7262
+    // Use software SPI for ST7262 (hardware SPI pins used by display)
+    Serial.println("Using Software SPI...");
+    SoftSpiDriver<SD_MISO, SD_MOSI, SD_SCK> softSpi;
+    if (!SD.begin(SdSpiConfig(SD_CS, DEDICATED_SPI, SD_SCK_MHZ(4), &softSpi))) {
+    #else
     // Initialize SPI1 bus for SD card
+    Serial.println("Using Hardware SPI1...");
     SPI1.setMOSI(SD_MOSI);
     SPI1.setMISO(SD_MISO);
     SPI1.setSCK(SD_SCK);
@@ -284,6 +420,7 @@ void test_sd_card() {
     
     // Initialize SD card on SPI1 with SdFat
     if (!SD.begin(SdSpiConfig(SD_CS, SHARED_SPI, SD_SCK_MHZ(25), &SPI1))) {
+    #endif
         Serial.println("ERROR: SD card initialization failed!");
         Serial.println("Possible causes:");
         Serial.println("  - No SD card inserted");

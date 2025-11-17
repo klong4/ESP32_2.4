@@ -23,6 +23,11 @@ bool lvgl_port_init(void);
  */
 void lvgl_port_task_handler(void);
 
+/**
+ * Global flush counter for debugging
+ */
+extern volatile uint32_t lvgl_flush_count;
+
 #ifdef __cplusplus
 }
 #endif

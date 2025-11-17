@@ -1,5 +1,5 @@
 /**
- * @file lvgl_port.c
+ * @file lvgl_port.cpp
  * LVGL porting layer for ST7789 Parallel + FT5x26 on Teensy 4.0
  */
 
@@ -17,21 +17,21 @@ static lv_color_t disp_buf1[DISP_BUF_SIZE];
 static lv_display_t *disp;
 static lv_indev_t *indev_touchpad;
 
-/* Global flush counter for debugging */
-volatile uint32_t lvgl_flush_count = 0;
-
 /* Forward declarations */
 static void disp_flush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map);
 static void touchpad_read(lv_indev_t *indev, lv_indev_data_t *data);
 
 bool lvgl_port_init(void)
 {
+    Serial.println("[LVGL_PORT] Initializing LVGL");
+    
     /* Initialize LVGL */
     lv_init();
     
     /* Create display */
     disp = lv_display_create(DISPLAY_WIDTH, DISPLAY_HEIGHT);
     if (!disp) {
+        Serial.println("[LVGL_PORT] ERROR: Failed to create display");
         return false;
     }
     
@@ -44,12 +44,14 @@ bool lvgl_port_init(void)
     /* Create touchpad input device */
     indev_touchpad = lv_indev_create();
     if (!indev_touchpad) {
+        Serial.println("[LVGL_PORT] ERROR: Failed to create input device");
         return false;
     }
     
     lv_indev_set_type(indev_touchpad, LV_INDEV_TYPE_POINTER);
     lv_indev_set_read_cb(indev_touchpad, touchpad_read);
     
+    Serial.println("[LVGL_PORT] LVGL initialized successfully");
     return true;
 }
 
@@ -70,8 +72,6 @@ void lvgl_port_task_handler(void)
 /* Display flush callback */
 static void disp_flush(lv_display_t *disp_drv, const lv_area_t *area, uint8_t *px_map)
 {
-    lvgl_flush_count++;  // Increment counter each time flush is called
-    
     uint16_t *color_p = (uint16_t *)px_map;
     
     /* Set the drawing region */

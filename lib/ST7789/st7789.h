@@ -81,6 +81,11 @@ extern "C" {
 #define ST7789_WIDTH  240
 #define ST7789_HEIGHT 320
 
+// SPI Communication modes
+#define ST7789_SPI_MODE_HW_4WIRE  0  // Hardware SPI with DC pin (default)
+#define ST7789_SPI_MODE_HW_3WIRE  1  // Hardware SPI with D/C as first bit
+#define ST7789_SPI_MODE_BITBANG   2  // Bit-banged SPI
+
 // RGB565 Color definitions
 #define ST7789_BLACK   0x0000
 #define ST7789_WHITE   0xFFFF
@@ -105,6 +110,8 @@ typedef struct {
     int pin_dc;        // DCX - Data/Command (Pin 11 on display)
     int pin_rst;       // RESX - Reset (Pin 30 on display, optional)
     int pin_bl;        // LED-A - Backlight (Pin 38 on display)
+    int pin_im0;       // IM0 - Interface mode bit 0 (Pin 31 on display)
+    int pin_im2;       // IM2 - Interface mode bit 2 (Pin 32 on display)
     int spi_clock_mhz; // SPI clock speed in MHz (e.g., 30 for Teensy 4.0)
 } st7789_config_t;
 
@@ -199,6 +206,19 @@ void st7789_wake(void);
  * @brief Turn display on
  */
 void st7789_display_on(void);
+
+/**
+ * @brief Set SPI settings for testing different speeds and modes
+ * @param speed SPI clock speed in Hz
+ * @param mode SPI mode (SPI_MODE0, SPI_MODE1, SPI_MODE2, or SPI_MODE3)
+ */
+void st7789_set_spi_settings(uint32_t speed, uint8_t mode);
+
+/**
+ * @brief Set SPI communication mode
+ * @param mode ST7789_SPI_MODE_HW_4WIRE, ST7789_SPI_MODE_HW_3WIRE, or ST7789_SPI_MODE_BITBANG
+ */
+void st7789_set_spi_mode(uint8_t mode);
 
 #ifdef __cplusplus
 }

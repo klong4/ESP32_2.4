@@ -1,23 +1,51 @@
 #include "st7789.h"
 #include <Arduino.h>
+#include <SPI.h>
 
 static st7789_config_t display_config;
+static SPISettings spi_settings(30000000, MSBFIRST, SPI_MODE0);
+static uint8_t current_spi_mode = ST7789_SPI_MODE_HW_4WIRE; // Default to 4-wire hardware SPI
+static uint32_t bitbang_delay_us = 1; // Delay for bit-banging
 
-// Bit-banged SPI functions (like Newhaven sample)
-static void st7789_spi_write_byte(uint8_t data) {
+// Allow runtime SPI settings changes for testing
+void st7789_set_spi_settings(uint32_t speed, uint8_t mode) {
+    spi_settings = SPISettings(speed, MSBFIRST, mode);
+}
+
+// Set SPI communication mode
+void st7789_set_spi_mode(uint8_t mode) {
+    current_spi_mode = mode;
+    
+    if (mode == ST7789_SPI_MODE_BITBANG) {
+        // Switch to GPIO mode for bit-banging
+        SPI.end();
+        pinMode(display_config.pin_mosi, OUTPUT);
+        pinMode(display_config.pin_sclk, OUTPUT);
+        digitalWrite(display_config.pin_sclk, LOW);
+    } else {
+        // Re-initialize hardware SPI
+        SPI.begin();
+    }
+}
+
+// Bit-bang SPI write function
+static void st7789_spi_write_byte_bitbang(uint8_t data) {
     for (int i = 7; i >= 0; i--) {
         digitalWrite(display_config.pin_sclk, LOW);
-        delayMicroseconds(1);
-        
-        if (data & (1 << i)) {
-            digitalWrite(display_config.pin_mosi, HIGH);
-        } else {
-            digitalWrite(display_config.pin_mosi, LOW);
-        }
-        
-        delayMicroseconds(1);
+        digitalWrite(display_config.pin_mosi, (data >> i) & 0x01);
+        delayMicroseconds(bitbang_delay_us);
         digitalWrite(display_config.pin_sclk, HIGH);
-        delayMicroseconds(1);
+        delayMicroseconds(bitbang_delay_us);
+    }
+    digitalWrite(display_config.pin_sclk, LOW);
+}
+
+// Hardware SPI write function
+static void st7789_spi_write_byte(uint8_t data) {
+    if (current_spi_mode == ST7789_SPI_MODE_BITBANG) {
+        st7789_spi_write_byte_bitbang(data);
+    } else {
+        SPI.transfer(data);
     }
 }
 
@@ -48,26 +76,53 @@ static void st7789_spi_write_byte(uint8_t data) {
 #define ST7789_NVGAMCTRL 0xE1  // Negative Voltage Gamma Control
 
 static void st7789_send_cmd(uint8_t cmd) {
-    digitalWrite(display_config.pin_dc, LOW); // Command mode
-    digitalWrite(display_config.pin_cs, LOW);
-    st7789_spi_write_byte(cmd);
-    digitalWrite(display_config.pin_cs, HIGH);
-    digitalWrite(display_config.pin_dc, HIGH); // Back to data mode
+    if (current_spi_mode == ST7789_SPI_MODE_HW_3WIRE) {
+        // 3-wire mode: send D/C bit first (0 for command)
+        digitalWrite(display_config.pin_cs, LOW);
+        if (current_spi_mode != ST7789_SPI_MODE_BITBANG) SPI.beginTransaction(spi_settings);
+        st7789_spi_write_byte(0x00); // D/C bit = 0 for command
+        st7789_spi_write_byte(cmd);
+        if (current_spi_mode != ST7789_SPI_MODE_BITBANG) SPI.endTransaction();
+        digitalWrite(display_config.pin_cs, HIGH);
+    } else {
+        // 4-wire mode: use DC pin
+        digitalWrite(display_config.pin_dc, LOW); // Command mode
+        if (current_spi_mode != ST7789_SPI_MODE_BITBANG) SPI.beginTransaction(spi_settings);
+        digitalWrite(display_config.pin_cs, LOW);
+        st7789_spi_write_byte(cmd);
+        digitalWrite(display_config.pin_cs, HIGH);
+        if (current_spi_mode != ST7789_SPI_MODE_BITBANG) SPI.endTransaction();
+    }
 }
 
 static void st7789_send_data(const uint8_t *data, size_t len) {
     if (len == 0) return;
-    digitalWrite(display_config.pin_dc, HIGH); // Data mode
-    for (size_t i = 0; i < len; i++) {
+    
+    if (current_spi_mode == ST7789_SPI_MODE_HW_3WIRE) {
+        // 3-wire mode: send D/C bit first (1 for data)
         digitalWrite(display_config.pin_cs, LOW);
-        st7789_spi_write_byte(data[i]);
+        if (current_spi_mode != ST7789_SPI_MODE_BITBANG) SPI.beginTransaction(spi_settings);
+        st7789_spi_write_byte(0x01); // D/C bit = 1 for data
+        for (size_t i = 0; i < len; i++) {
+            st7789_spi_write_byte(data[i]);
+        }
+        if (current_spi_mode != ST7789_SPI_MODE_BITBANG) SPI.endTransaction();
         digitalWrite(display_config.pin_cs, HIGH);
+    } else {
+        // 4-wire mode: use DC pin
+        digitalWrite(display_config.pin_dc, HIGH); // Data mode
+        if (current_spi_mode != ST7789_SPI_MODE_BITBANG) SPI.beginTransaction(spi_settings);
+        digitalWrite(display_config.pin_cs, LOW);
+        for (size_t i = 0; i < len; i++) {
+            st7789_spi_write_byte(data[i]);
+        }
+        digitalWrite(display_config.pin_cs, HIGH);
+        if (current_spi_mode != ST7789_SPI_MODE_BITBANG) SPI.endTransaction();
     }
 }
 
 static void st7789_end_transaction(void) {
-    // CS is already high after each byte - this is now a no-op
-    // but kept for API compatibility
+    // Transaction already ended in send functions
 }
 
 static void st7789_send_u8(uint8_t data) {
@@ -105,15 +160,25 @@ bool st7789_init(const st7789_config_t *config) {
     
     display_config = *config;
     
-    // Configure pins
+    // Initialize hardware SPI
+    SPI.begin();
+    
+    // Configure interface mode pins (IM0, IM2)
+    // For 4-wire SPI: IM0=HIGH, IM2=HIGH (IM[3:0]=1101b with internal IM1/IM3 pulled low)
+    if (config->pin_im0 >= 0) {
+        pinMode(config->pin_im0, OUTPUT);
+        digitalWrite(config->pin_im0, HIGH); // IM0 = 1 for SPI mode
+    }
+    if (config->pin_im2 >= 0) {
+        pinMode(config->pin_im2, OUTPUT);
+        digitalWrite(config->pin_im2, HIGH); // IM2 = 1 for 4-wire SPI
+    }
+    
+    // Configure control pins
     pinMode(config->pin_dc, OUTPUT);
     pinMode(config->pin_cs, OUTPUT);
-    pinMode(config->pin_mosi, OUTPUT);
-    pinMode(config->pin_sclk, OUTPUT);
     digitalWrite(config->pin_cs, HIGH); // Deselect
-    digitalWrite(config->pin_sclk, LOW); // Clock starts low
     digitalWrite(config->pin_dc, HIGH); // Data mode default
-    digitalWrite(config->pin_mosi, LOW); // Data low default
     
     if (config->pin_rst >= 0) {
         pinMode(config->pin_rst, OUTPUT);
