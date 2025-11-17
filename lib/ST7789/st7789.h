@@ -195,6 +195,11 @@ void st7789_sleep(void);
  */
 void st7789_wake(void);
 
+/**
+ * @brief Turn display on
+ */
+void st7789_display_on(void);
+
 #ifdef __cplusplus
 }
 #endif

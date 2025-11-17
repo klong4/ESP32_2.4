@@ -48,21 +48,26 @@ static void st7789_spi_write_byte(uint8_t data) {
 #define ST7789_NVGAMCTRL 0xE1  // Negative Voltage Gamma Control
 
 static void st7789_send_cmd(uint8_t cmd) {
-    digitalWrite(display_config.pin_cs, LOW);
     digitalWrite(display_config.pin_dc, LOW); // Command mode
+    digitalWrite(display_config.pin_cs, LOW);
     st7789_spi_write_byte(cmd);
+    digitalWrite(display_config.pin_cs, HIGH);
     digitalWrite(display_config.pin_dc, HIGH); // Back to data mode
 }
 
 static void st7789_send_data(const uint8_t *data, size_t len) {
     if (len == 0) return;
+    digitalWrite(display_config.pin_dc, HIGH); // Data mode
     for (size_t i = 0; i < len; i++) {
+        digitalWrite(display_config.pin_cs, LOW);
         st7789_spi_write_byte(data[i]);
+        digitalWrite(display_config.pin_cs, HIGH);
     }
 }
 
 static void st7789_end_transaction(void) {
-    digitalWrite(display_config.pin_cs, HIGH);
+    // CS is already high after each byte - this is now a no-op
+    // but kept for API compatibility
 }
 
 static void st7789_send_u8(uint8_t data) {
@@ -193,9 +198,9 @@ bool st7789_init(const st7789_config_t *config) {
     
     delay(10);
     
-    // Display On
-    st7789_write_cmd(ST7789_DISPON);
-    delay(120);
+    // Don't turn on display yet - wait until after first pixel write
+    // st7789_write_cmd(ST7789_DISPON);
+    // delay(120);
     
     // Turn on backlight
     if (config->pin_bl >= 0) {
@@ -318,4 +323,9 @@ void st7789_sleep(void) {
 void st7789_wake(void) {
     st7789_write_cmd(ST7789_SLPOUT);
     delay(120);
+}
+
+void st7789_display_on(void) {
+    st7789_write_cmd(0x29); // Display ON
+    delay(10);
 }

@@ -6,8 +6,18 @@
 - **Interface**: 3-wire SPI (IM0=1, IM2=1)
 
 ## Interface Mode Selection
-- **IM0** (Pin 31) = **3.3V (HIGH)** - 3-wire SPI mode
-- **IM2** (Pin 32) = **3.3V (HIGH)** - 3-wire SPI mode
+- **IM0** (Pin 31) = **3.3V (HIGH)** - Set externally
+- **IM1** (internal) = **Pulled LOW** - Internal pull-down
+- **IM2** (Pin 32) = **3.3V (HIGH)** - Set externally  
+- **IM3** (internal) = **Pulled LOW** - Internal pull-down
+
+**Resulting mode: IM[3:0] = 1101b = 4-wire SPI with separate DC pin** ✓
+
+This configuration enables 4-wire SPI mode where:
+- DCX (Pin 11/Teensy Pin 9) serves as Data/Command select
+- WRX (Pin 12/Teensy Pin 13) serves as SPI Clock
+- SDA (Pin 9/Teensy Pin 11) serves as MOSI
+- SDO (Pin 6/Teensy Pin 12) serves as MISO
 
 ## Pin Connections
 
@@ -45,18 +55,18 @@
 | 5 | /INT | Interrupt | 7 | Touch interrupt (optional) |
 | 6 | /RESET | Reset | 8 | Active Low Reset (can share with display) |
 
-### SD Card - SPI1 (Secondary SPI Bus)
+### SD Card - SPI1 (Dedicated SPI Bus)
 
 | SD Card Pin | Function | Teensy 4.0 Pin | Notes |
 |-------------|----------|----------------|-------|
-| **CS** | **Chip Select** | **1** | **Any free GPIO, using Pin 1** |
-| **MOSI** | **SPI MOSI** | **11** | **Shared with display MOSI** |
-| **MISO** | **SPI MISO** | **12** | **Shared with display MISO** |
-| **SCK** | **SPI Clock** | **13** | **Shared with display SCK** |
+| **CS** | **Chip Select** | **0** | **Dedicated CS on Pin 0** |
+| **MOSI** | **SPI MOSI** | **26** | **SPI1 MOSI (dedicated)** |
+| **MISO** | **SPI MISO** | **1** | **SPI1 MISO (dedicated)** |
+| **SCK** | **SPI Clock** | **27** | **SPI1 SCK (dedicated)** |
 | VCC | Power (3.3V) | 3.3V | SD card power |
 | GND | Ground | GND | Ground |
 
-**Note**: SD card shares the same SPI bus as the display. Devices are selected using different CS pins (Pin 10 for display, Pin 1 for SD card).
+**Note**: SD card uses dedicated SPI1 bus (pins 0, 1, 26, 27), completely separate from the display SPI0 bus (pins 9, 10, 11, 12, 13).
 
 ## Teensy 4.0 Pin Summary
 
@@ -64,18 +74,21 @@
 |------------|----------|--------------|
 | 3.3V | Power | VDD, VDDI, IM0, IM2, RDX |
 | GND | Ground | GND pins, LED-K1-4 |
-| **1** | **SD Card CS** | **SD CS** |
+| **0** | **SD Card CS** | **SD CS (SPI1)** |
+| **1** | **SD MISO** | **SD MISO (SPI1)** |
 | **2** | **Tearing Effect** | **TE (Pin 40)** |
 | 6 | Backlight PWM | LED-A via resistor |
 | 7 | Touch Interrupt | CTP /INT |
 | 8 | Reset | RESX & CTP /RESET |
 | **9** | **D/C Select** | **DCX (Pin 11)** |
 | **10** | **Display CS** | **CSX (Pin 10)** |
-| **11** | **SPI MOSI** | **Display SDA (Pin 9) + SD MOSI** |
-| **12** | **SPI MISO** | **Display SDO (Pin 6) + SD MISO** |
-| **13** | **SPI SCK** | **Display WRX (Pin 12) + SD SCK** |
+| **11** | **SPI0 MOSI** | **Display SDA (Pin 9)** |
+| **12** | **SPI0 MISO** | **Display SDO (Pin 6)** |
+| **13** | **SPI0 SCK** | **Display WRX (Pin 12)** |
 | 18 | I2C SDA | CTP SDA |
 | 19 | I2C SCL | CTP SCL |
+| **26** | **SD MOSI** | **SD MOSI (SPI1)** |
+| **27** | **SD SCK** | **SD SCK (SPI1)** |
 
 ## 3-Wire SPI Protocol
 
@@ -109,19 +122,17 @@ In 3-wire SPI mode on the ST7789VI:
    - Teensy 4.0 provides 3.3V from its voltage regulator
 
 5. **SPI Speed**:
-   - Display (SPI): Configured for 30MHz on Teensy 4.0 (can be increased up to 50MHz)
-   - SD Card (SPI): Typically 25MHz or lower for reliability
+   - Display (SPI0): Configured for 30MHz on Teensy 4.0 (can be increased up to 50MHz)
+   - SD Card (SPI1): Typically 25MHz or lower for reliability
 
-6. **Shared SPI Bus**:
-   - Display and SD card share the same SPI bus (Pins 11, 12, 13)
-   - Devices are selected using different CS pins:
-     - **Display CS**: Pin 10
-     - **SD Card CS**: Pin 1
-   - Only one device can be active at a time (CS LOW)
+6. **Dedicated SPI Buses**:
+   - **Display uses SPI0** (Pins 11, 12, 13) - bit-banged for ST7789 compatibility
+   - **SD Card uses SPI1** (Pins 26, 27, 1) - hardware SPI for better performance
+   - No bus sharing = no conflicts, better reliability
 
 7. **Shared Reset Pin**:
    - Pin 8 can be safely shared between display (RESX) and touch (CTP /RESET)
-   - SD cards don't use a reset pin, only CS for device selection
+   - SD cards don't use a reset pin
 
 ## Software Configuration
 
@@ -129,9 +140,9 @@ In 3-wire SPI mode on the ST7789VI:
 // Pin definitions
 #define TFT_DC      9   // Data/Command Select
 #define TFT_CS      10  // Chip Select
-#define TFT_MOSI    11  // SPI MOSI
-#define TFT_SCLK    13  // SPI Clock
-#define TFT_MISO    12  // SPI MISO
+#define TFT_MOSI    11  // SPI0 MOSI
+#define TFT_SCLK    13  // SPI0 Clock
+#define TFT_MISO    12  // SPI0 MISO
 #define TFT_RST     8   // Reset
 #define TFT_BL      6   // Backlight PWM
 #define TFT_TE      2   // Tearing Effect (vsync)
@@ -140,11 +151,13 @@ In 3-wire SPI mode on the ST7789VI:
 #define TOUCH_SCL   19  // I2C Clock
 #define TOUCH_INT   7   // Touch Interrupt
 
-#define SD_CS       1   // SD Card Chip Select
-// SD shares SPI bus with display (pins 11, 12, 13)
+#define SD_CS       0   // SD Card Chip Select (SPI1)
+#define SD_MOSI     26  // SD MOSI (SPI1)
+#define SD_MISO     1   // SD MISO (SPI1)
+#define SD_SCK      27  // SD SCK (SPI1)
 
-// Display configuration
-ili9341_config_t display_config = {
+// Display configuration (bit-banged SPI)
+st7789_config_t display_config = {
     .pin_mosi = TFT_MOSI,
     .pin_miso = TFT_MISO,
     .pin_sclk = TFT_SCLK,
@@ -155,8 +168,9 @@ ili9341_config_t display_config = {
     .spi_clock_mhz = 30
 };
 
-// SD Card uses same SPI bus, different CS pin
-// Initialize with: SD.begin(SD_CS)
+// SD Card uses SPI1 (separate hardware SPI bus)
+// Initialize with: SPI1.setMOSI(SD_MOSI); SPI1.setMISO(SD_MISO); 
+//                  SPI1.setSCK(SD_SCK); SD.begin(SD_CS, SPI1);
 ```
 
 ## Testing
